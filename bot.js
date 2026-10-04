@@ -19,7 +19,6 @@ if (!token) {
 
 const bot = new TelegramBot(token, { polling: true });
 
-// Modern Firebase Initialization
 initializeApp({
   credential: cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -30,23 +29,21 @@ initializeApp({
 const db = getFirestore();
 
 const formatWord = (str) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+const members = ["Aomy", "Mahin", "Piash", "Sayem", "Inan", "Pulok"];
 
 // --- 3. ADD SPENDING COMMAND (Supports multiple amounts) ---
-// Listens for: "add aomy bazar 500 100 300"
 bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const person = formatWord(match[1]);
   const category = formatWord(match[2]);
   
-  // Convert string like "500 100 300" into an array and sum it up
   const amountString = match[3].trim();
   const amountArray = amountString.split(/\s+/).map(Number);
   const totalAmount = amountArray.reduce((sum, curr) => sum + curr, 0);
 
-  const validMembers = ["Aomy", "Mahin", "Piash", "Sayem", "Inan", "Pulok"];
   const validCategories = ["Bazar", "Electricity", "Gas", "Water", "Internet"];
 
-  if (!validMembers.includes(person)) return bot.sendMessage(chatId, `❌ Invalid person. Must be: ${validMembers.join(", ")}`);
+  if (!members.includes(person)) return bot.sendMessage(chatId, `❌ Invalid person. Must be: ${members.join(", ")}`);
   if (!validCategories.includes(category)) return bot.sendMessage(chatId, `❌ Invalid category. Must be: ${validCategories.join(", ")}`);
   if (isNaN(totalAmount) || totalAmount <= 0) return bot.sendMessage(chatId, `❌ Invalid amounts provided.`);
 
@@ -65,35 +62,61 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
   }
 });
 
-// --- HELPER FUNCTION: GENERATE SUMMARY TEXT ---
-const generateSummaryText = (title, expenses) => {
+// --- HELPER FUNCTION: GENERATE ADVANCED SUMMARY TEXT ---
+const generateSummaryText = (title, expenses, exclusions) => {
   const bazarTotal = expenses.filter(e => e.category === "Bazar").reduce((sum, e) => sum + e.amount, 0);
   const billsTotal = expenses.filter(e => e.category !== "Bazar").reduce((sum, e) => sum + e.amount, 0);
-  const total = bazarTotal + billsTotal;
+  const grandTotal = bazarTotal + billsTotal;
+
+  // Calculate Shares
+  const bazarParticipants = members.filter(m => !exclusions[m]).length;
+  const bazarShare = bazarParticipants > 0 ? bazarTotal / bazarParticipants : 0;
+  const billsShare = billsTotal / members.length;
 
   let text = `📊 *${title} Summary*\n\n`;
-  text += `🛒 *Total Bazar: ${bazarTotal.toFixed(2)} Tk*\n`;
   
+  text += `🛒 *Bazar Total: ${bazarTotal.toFixed(2)} Tk*\n`;
+  text += `   _(Per person: ${bazarShare.toFixed(2)} Tk)_\n`;
   const bazarMap = {};
   expenses.filter(e => e.category === "Bazar").forEach(e => {
     bazarMap[e.person] = (bazarMap[e.person] || 0) + e.amount;
   });
   for (const [p, amt] of Object.entries(bazarMap)) {
-    text += `  • ${p}: ${amt} Tk\n`;
+    text += `  • ${p}: spent ${amt.toFixed(2)} Tk\n`;
   }
 
-  text += `\n💡 *Total Bills: ${billsTotal.toFixed(2)} Tk*\n`;
-  
+  text += `\n💡 *Bills Total: ${billsTotal.toFixed(2)} Tk*\n`;
+  text += `   _(Per person: ${billsShare.toFixed(2)} Tk)_\n`;
   const billsMap = {};
   expenses.filter(e => e.category !== "Bazar").forEach(e => {
     billsMap[e.person] = (billsMap[e.person] || 0) + e.amount;
   });
   for (const [p, amt] of Object.entries(billsMap)) {
-    const pBills = expenses.filter(e => e.person === p && e.category !== "Bazar").map(e => `${e.category}: ${e.amount}`).join(", ");
-    text += `  • ${p} (${pBills}): ${amt} Tk\n`;
+    text += `  • ${p}: spent ${amt.toFixed(2)} Tk\n`;
   }
 
-  text += `\n💰 *Grand Total: ${total.toFixed(2)} Tk*`;
+  text += `\n💰 *Grand Total: ${grandTotal.toFixed(2)} Tk*\n`;
+  text += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  // Calculate Final Settlement
+  text += `⚖️ *FINAL SETTLEMENT*\n\n`;
+  members.forEach(m => {
+    const paidBazar = bazarMap[m] || 0;
+    const paidBills = billsMap[m] || 0;
+    const owedBazar = exclusions[m] ? 0 : bazarShare;
+    const owedBills = billsShare;
+
+    const net = (paidBazar + paidBills) - (owedBazar + owedBills);
+
+    if (net > 0) {
+      text += `🟢 *${m}* gets refund: +${net.toFixed(2)} Tk\n`;
+    } else if (net < 0) {
+      text += `🔴 *${m}* owes: ${Math.abs(net).toFixed(2)} Tk\n`;
+    } else {
+      text += `⚪ *${m}* is settled (0.00 Tk)\n`;
+    }
+  });
+
   return text;
 };
 
@@ -102,13 +125,14 @@ bot.onText(/^summary$/i, async (msg) => {
   const chatId = msg.chat.id;
   try {
     const metaDoc = await db.collection("topkhana").doc("metadata").get();
-    const currentMonthName = metaDoc.exists ? metaDoc.data().currentMonthName : "Current Month";
+    const currentMonthName = metaDoc.exists ? (metaDoc.data().currentMonthName || "Current Month") : "Current Month";
+    const exclusions = metaDoc.exists ? (metaDoc.data().bazarExclusions || { Inan: true, Pulok: true }) : { Inan: true, Pulok: true };
     
     const snapshot = await db.collection("topkhana_expenses").get();
     if (snapshot.empty) return bot.sendMessage(chatId, `No expenses recorded for ${currentMonthName} yet.`);
     
     const expenses = snapshot.docs.map(doc => doc.data());
-    bot.sendMessage(chatId, generateSummaryText(currentMonthName, expenses), { parse_mode: 'Markdown' });
+    bot.sendMessage(chatId, generateSummaryText(currentMonthName, expenses, exclusions), { parse_mode: 'Markdown' });
   } catch (error) {
     bot.sendMessage(chatId, `❌ Error fetching summary: ${error.message}`);
   }
@@ -125,7 +149,8 @@ bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})$/i, async (msg, match) => {
     
     if (!targetMonth) return bot.sendMessage(chatId, `❌ Could not find an archive for "${searchTitle}".`);
 
-    bot.sendMessage(chatId, generateSummaryText(targetMonth.title, targetMonth.expenses), { parse_mode: 'Markdown' });
+    const exclusions = targetMonth.exclusions || { Inan: true, Pulok: true };
+    bot.sendMessage(chatId, generateSummaryText(targetMonth.title, targetMonth.expenses, exclusions), { parse_mode: 'Markdown' });
   } catch (error) {
     bot.sendMessage(chatId, `❌ Error fetching history: ${error.message}`);
   }
