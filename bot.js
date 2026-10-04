@@ -1,9 +1,6 @@
-const botApi = require('node-telegram-bot-api');
+const TelegramBot = require('node-telegram-bot-api');
 const admin = require('firebase-admin');
 const express = require('express');
-
-// Safely extract the constructor whether it's wrapped or not
-const TelegramBot = botApi.default || botApi;
 
 // --- 1. RENDER HEALTH CHECK SERVER ---
 const app = express();
@@ -13,13 +10,6 @@ app.listen(port, () => console.log(`Web server listening on port ${port}`));
 
 // --- 2. INITIALIZE BOT & FIREBASE ---
 const token = process.env.TELEGRAM_TOKEN;
-
-// Failsafe check
-if (!token) {
-  console.error("❌ CRITICAL ERROR: TELEGRAM_TOKEN environment variable is missing!");
-  process.exit(1);
-}
-
 const bot = new TelegramBot(token, { polling: true });
 
 admin.initializeApp({
