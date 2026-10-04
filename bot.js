@@ -99,8 +99,19 @@ const generateSummaryText = (title, expenses, exclusions) => {
 };
 
 // --- 4. START COMMAND ---
-bot.onText(/^\/start$/, (msg) => {
-  bot.sendMessage(msg.chat.id, "👋 Welcome to Topkhana Tracker!\nWhat would you like to do?", getMainMenu());
+bot.onText(/^\/start$/, async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    const metaDoc = await db.collection("topkhana").doc("metadata").get();
+    const currentMonthName = metaDoc.exists ? (metaDoc.data().currentMonthName || "Unknown Month") : "Unknown Month";
+    
+    bot.sendMessage(chatId, `👋 Welcome to Topkhana Tracker!\nCurrent month: *${currentMonthName}*\n\nWhat would you like to do?`, { 
+      parse_mode: 'Markdown', 
+      ...getMainMenu() 
+    });
+  } catch (error) {
+    bot.sendMessage(chatId, `❌ Error connecting to database: ${error.message}`);
+  }
 });
 
 // --- 5. HANDLE BUTTON CLICKS ---
@@ -187,7 +198,12 @@ bot.on('callback_query', async (query) => {
 
     // -- HISTORY & RESTORE FLOW --
     else if (data === "menu_history") {
-      const snapshot = await db.collection("topkhana_history").get();
+      // LIMITED TO THE MOST RECENT 6 MONTHS
+      const snapshot = await db.collection("topkhana_history")
+                               .orderBy("createdAt", "desc")
+                               .limit(6)
+                               .get();
+
       if (snapshot.empty) {
         await bot.editMessageText("No archived months found.", { chat_id: chatId, message_id: messageId, ...getBackMenu() });
         return;
@@ -199,7 +215,7 @@ bot.on('callback_query', async (query) => {
       });
       keyboard.inline_keyboard.push([{ text: "🔙 Back", callback_data: "menu_main" }]);
 
-      await bot.editMessageText("📜 *Archived Months*\nSelect a month to view its settlement:", {
+      await bot.editMessageText("📜 *Recent Archives (Last 6 Months)*\nSelect a month to view its settlement:", {
         chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: keyboard
       });
     }
