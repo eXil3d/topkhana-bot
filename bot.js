@@ -1,6 +1,9 @@
-const TelegramBot = require('node-telegram-bot-api');
+const botApi = require('node-telegram-bot-api');
 const admin = require('firebase-admin');
 const express = require('express');
+
+// Safely extract the constructor (Bulletproof fallback)
+const TelegramBot = botApi.default || botApi;
 
 // --- 1. RENDER HEALTH CHECK SERVER ---
 const app = express();
@@ -10,13 +13,21 @@ app.listen(port, () => console.log(`Web server listening on port ${port}`));
 
 // --- 2. INITIALIZE BOT & FIREBASE ---
 const token = process.env.TELEGRAM_TOKEN;
+
+// Failsafe check for the token
+if (!token) {
+  console.error("❌ CRITICAL ERROR: TELEGRAM_TOKEN environment variable is missing in Render!");
+  process.exit(1);
+}
+
+// Initialize the bot
 const bot = new TelegramBot(token, { polling: true });
 
+// Initialize Firebase securely via Render Environment Variables
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    // Safely handles the linebreaks in the private key from Render's dashboard
     privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
   })
 });
@@ -51,7 +62,6 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
       createdAt: Date.now()
     });
     
-    // If they typed multiple numbers, show the math in the success message
     const calculationNote = amountArray.length > 1 ? ` (${amountArray.join(" + ")} = ${totalAmount})` : ``;
     bot.sendMessage(chatId, `✅ Added ${totalAmount} Tk${calculationNote} for ${person} in ${category}!`);
   } catch (error) {
@@ -124,3 +134,5 @@ bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})$/i, async (msg, match) => {
     bot.sendMessage(chatId, `❌ Error fetching history: ${error.message}`);
   }
 });
+
+console.log("Topkhana Telegram Bot initialized successfully!");
