@@ -2,7 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const express = require('express');
-const https = require('https'); // Built-in Node module for the self-ping
+const https = require('https');
 
 // --- 1. RENDER HEALTH CHECK SERVER & ANTI-SLEEP ---
 const app = express();
@@ -11,20 +11,13 @@ const port = process.env.PORT || 3000;
 
 app.listen(port, () => {
   console.log(`Web server listening on port ${port}`);
-  
-  // Anti-Sleep Self-Ping (Fires every 14 minutes)
   setInterval(() => {
     const url = process.env.RENDER_EXTERNAL_URL;
     if (url) {
-      https.get(url, (res) => {
-        console.log(`⏰ Anti-sleep ping sent. Status: ${res.statusCode} OK`);
-      }).on('error', (err) => {
-        console.error(`❌ Anti-sleep ping failed: ${err.message}`);
-      });
-    } else {
-      console.log('⚠️ RENDER_EXTERNAL_URL not found. Skipping self-ping.');
+      https.get(url, (res) => console.log(`⏰ Anti-sleep ping: ${res.statusCode} OK`))
+           .on('error', (err) => console.error(`❌ Ping failed: ${err.message}`));
     }
-  }, 14 * 60 * 1000); // 14 minutes in milliseconds
+  }, 14 * 60 * 1000);
 });
 
 // --- 2. INITIALIZE BOT & FIREBASE ---
@@ -54,15 +47,14 @@ const getMainMenu = () => ({
     inline_keyboard: [
       [{ text: "➕ Add New Expense", callback_data: "menu_add" }],
       [{ text: "📊 Current Month Summary", callback_data: "menu_summary" }],
-      [{ text: "📜 View Past Months (History)", callback_data: "menu_history" }]
+      [{ text: "📜 View Past Months (History)", callback_data: "menu_history" }],
+      [{ text: "🆕 Start New Month (Archive)", callback_data: "menu_archive" }]
     ]
   }
 });
 
 const getBackMenu = () => ({
-  reply_markup: {
-    inline_keyboard: [[{ text: "🔙 Back to Main Menu", callback_data: "menu_main" }]]
-  }
+  reply_markup: { inline_keyboard: [[{ text: "🔙 Back to Main Menu", callback_data: "menu_main" }]] }
 });
 
 // --- HELPER: GENERATE SUMMARY TEXT ---
@@ -126,6 +118,7 @@ bot.on('callback_query', async (query) => {
       });
     } 
     
+    // -- ADD EXPENSE FLOW --
     else if (data === "menu_add") {
       const keyboard = { inline_keyboard: [] };
       for (let i = 0; i < members.length; i += 2) {
@@ -165,6 +158,7 @@ bot.on('callback_query', async (query) => {
       });
     }
 
+    // -- VIEW CURRENT SUMMARY --
     else if (data === "menu_summary") {
       const metaDoc = await db.collection("topkhana").doc("metadata").get();
       const currentMonthName = metaDoc.exists ? (metaDoc.data().currentMonthName || "Current Month") : "Current Month";
@@ -182,6 +176,16 @@ bot.on('callback_query', async (query) => {
       });
     }
 
+    // -- ARCHIVE / START NEW MONTH --
+    else if (data === "menu_archive") {
+      await bot.deleteMessage(chatId, messageId);
+      await bot.sendMessage(chatId, `🆕 *Start New Month*\n\nReply to this message with the name of the NEW month you are starting (e.g., October 2026).\n\n_Note: This will safely archive all current active data to History._`, {
+        parse_mode: "Markdown",
+        reply_markup: { force_reply: true, selective: true }
+      });
+    }
+
+    // -- HISTORY & RESTORE FLOW --
     else if (data === "menu_history") {
       const snapshot = await db.collection("topkhana_history").get();
       if (snapshot.empty) {
@@ -208,8 +212,65 @@ bot.on('callback_query', async (query) => {
       const targetMonth = docSnap.data();
       const exclusions = targetMonth.exclusions || { Inan: true, Pulok: true };
       
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: "🔄 Restore This Month", callback_data: `ask_restore_${docId}` }],
+          [{ text: "🔙 Back to History", callback_data: "menu_history" }]
+        ]
+      };
+
       await bot.editMessageText(generateSummaryText(targetMonth.title, targetMonth.expenses, exclusions), {
-        chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', ...getBackMenu()
+        chat_id: chatId, message_id: messageId, parse_mode: 'Markdown', reply_markup: keyboard
+      });
+    }
+
+    // CONFIRM RESTORE WARNING
+    else if (data.startsWith("ask_restore_")) {
+      const docId = data.split("ask_restore_")[1];
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: "⚠️ YES, Restore this month", callback_data: `do_restore_${docId}` }],
+          [{ text: "❌ Cancel", callback_data: `hist_${docId}` }]
+        ]
+      };
+      await bot.editMessageText("⚠️ *WARNING*\nAre you sure you want to restore this month? Any unsaved data in your *current active month* will be replaced and permanently lost.", {
+        chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: keyboard
+      });
+    }
+
+    // EXECUTE RESTORE
+    else if (data.startsWith("do_restore_")) {
+      const docId = data.split("do_restore_")[1];
+      const docSnap = await db.collection("topkhana_history").doc(docId).get();
+      
+      if (!docSnap.exists) return bot.sendMessage(chatId, "❌ Error: Archive not found.");
+      const monthToRestore = docSnap.data();
+      
+      const batch = db.batch();
+      
+      // 1. Delete current active expenses
+      const activeSnap = await db.collection("topkhana_expenses").get();
+      activeSnap.docs.forEach(doc => batch.delete(doc.ref));
+
+      // 2. Insert restored expenses
+      monthToRestore.expenses.forEach(exp => {
+        const newExpRef = db.collection("topkhana_expenses").doc();
+        batch.set(newExpRef, { person: exp.person, category: exp.category, amount: exp.amount, createdAt: Date.now() });
+      });
+
+      // 3. Restore metadata
+      batch.set(db.collection("topkhana").doc("metadata"), {
+        currentMonthName: monthToRestore.title,
+        bazarExclusions: monthToRestore.exclusions || { Inan: true, Pulok: true }
+      });
+
+      // 4. Remove from history
+      batch.delete(docSnap.ref);
+
+      await batch.commit();
+
+      await bot.editMessageText(`✅ Successfully restored *${monthToRestore.title}* and made it the active month!`, {
+        chat_id: chatId, message_id: messageId, parse_mode: "Markdown", ...getMainMenu()
       });
     }
   } catch (error) {
@@ -217,18 +278,17 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// --- 6. HANDLE ADD EXPENSE NUMBER REPLIES ---
+// --- 6. HANDLE FORCE-REPLIES (Expenses & Archiving) ---
 bot.on('message', async (msg) => {
   if (msg.reply_to_message && msg.reply_to_message.from.username === (await bot.getMe()).username) {
     const originalText = msg.reply_to_message.text;
+    const chatId = msg.chat.id;
     
+    // Add Expense Reply
     if (originalText.includes("Expense Entry")) {
-      const chatId = msg.chat.id;
-      
       try {
         const personMatch = originalText.match(/Person:\s*([a-zA-Z]+)/);
         const categoryMatch = originalText.match(/Category:\s*([a-zA-Z]+)/);
-        
         if (!personMatch || !categoryMatch) return;
         
         const person = personMatch[1];
@@ -242,18 +302,46 @@ bot.on('message', async (msg) => {
           return bot.sendMessage(chatId, `❌ Invalid numbers provided. Please try again.`, getMainMenu());
         }
 
-        await db.collection("topkhana_expenses").add({
-          person,
-          category,
-          amount: totalAmount,
-          createdAt: Date.now()
-        });
+        await db.collection("topkhana_expenses").add({ person, category, amount: totalAmount, createdAt: Date.now() });
         
         const calcNote = amountArray.length > 1 ? ` (${amountArray.join(" + ")} = ${totalAmount})` : ``;
         bot.sendMessage(chatId, `✅ Successfully saved!\nAdded ${totalAmount} Tk${calcNote} for ${person} in ${category}.`, getMainMenu());
-        
       } catch (error) {
         bot.sendMessage(chatId, `❌ Error saving: ${error.message}`, getMainMenu());
+      }
+    }
+    
+    // Start New Month (Archive) Reply
+    else if (originalText.includes("Start New Month")) {
+      const newMonthName = msg.text.trim();
+      try {
+        const metaDoc = await db.collection("topkhana").doc("metadata").get();
+        const currentMonthName = metaDoc.exists ? (metaDoc.data().currentMonthName || "Unknown Month") : "Unknown Month";
+        const exclusions = metaDoc.exists ? (metaDoc.data().bazarExclusions || { Inan: true, Pulok: true }) : { Inan: true, Pulok: true };
+        
+        const snapshot = await db.collection("topkhana_expenses").get();
+        const expenses = snapshot.docs.map(doc => doc.data());
+
+        const batch = db.batch();
+        
+        // 1. Save to History
+        const newHistoryRef = db.collection("topkhana_history").doc();
+        batch.set(newHistoryRef, { title: currentMonthName, expenses: expenses, exclusions: exclusions, createdAt: Date.now() });
+
+        // 2. Wipe active collection
+        snapshot.docs.forEach(doc => batch.delete(doc.ref));
+
+        // 3. Update metadata to new month
+        batch.set(db.collection("topkhana").doc("metadata"), {
+          currentMonthName: newMonthName,
+          bazarExclusions: { Inan: true, Pulok: true }
+        });
+
+        await batch.commit();
+
+        bot.sendMessage(chatId, `✅ Successfully archived *${currentMonthName}*!\n\nStarted fresh tracking for *${newMonthName}*.`, { parse_mode: "Markdown", ...getMainMenu() });
+      } catch (error) {
+        bot.sendMessage(chatId, `❌ Error archiving month: ${error.message}`, getMainMenu());
       }
     }
   }
