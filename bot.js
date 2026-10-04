@@ -2,47 +2,72 @@ const botApi = require('node-telegram-bot-api');
 const admin = require('firebase-admin');
 const express = require('express');
 
-// Safely extract the constructor (Bulletproof fallback)
-const TelegramBot = botApi.default || botApi;
+// --- 1. BULLETPROOF CONSTRUCTOR EXTRACTION ---
+// Resolves the 'is not a constructor' bug across different deployment setups
+let TelegramBot;
+if (typeof botApi === 'function') {
+  TelegramBot = botApi;
+} else if (botApi && typeof botApi.default === 'function') {
+  TelegramBot = botApi.default;
+} else {
+  console.error("❌ CRITICAL: Could not find a valid TelegramBot constructor in node-telegram-bot-api.");
+  process.exit(1); 
+}
 
-// --- 1. RENDER HEALTH CHECK SERVER ---
+// --- 2. RENDER HEALTH CHECK SERVER ---
 const app = express();
-app.get('/', (req, res) => res.send('Topkhana Bot is running 24/7!'));
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Web server listening on port ${port}`));
+app.use(express.json()); // Prepares the server if you transition to webhooks later
 
-// --- 2. INITIALIZE BOT & FIREBASE ---
+app.get('/', (req, res) => res.send('Topkhana Bot is running 24/7!'));
+
+const port = process.env.PORT || 3000;
+// Render containers strictly require binding to 0.0.0.0 to pass health checks
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Web server listening on port \${port}`);
+});
+
+// --- 3. INITIALIZE BOT & FIREBASE ---
 const token = process.env.TELEGRAM_TOKEN;
 
-// Failsafe check for the token
 if (!token) {
   console.error("❌ CRITICAL ERROR: TELEGRAM_TOKEN environment variable is missing in Render!");
   process.exit(1);
 }
 
-// Initialize the bot
-const bot = new TelegramBot(token, { polling: true });
+// Initialize the bot safely
+let bot;
+try {
+  bot = new TelegramBot(token, { polling: true });
+  console.log("✅ TelegramBot initialized successfully!");
+} catch (error) {
+  console.error("❌ Failed to instantiate TelegramBot:", error.message);
+  process.exit(1);
+}
 
 // Initialize Firebase securely via Render Environment Variables
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
-  })
-});
-const db = admin.firestore();
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      // Fixed potential newline rendering issues common in environment strings
+      privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
+    })
+  });
+  console.log("✅ Firebase Admin initialized successfully!");
+} catch (error) {
+  console.error("❌ Firebase Initialization Error:", error.message);
+}
 
+const db = admin.firestore();
 const formatWord = (str) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 
-// --- 3. ADD SPENDING COMMAND (Supports multiple amounts) ---
-// Listens for: "add aomy bazar 500 100 300"
+// --- 4. ADD SPENDING COMMAND (Supports multiple amounts) ---
 bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const person = formatWord(match[1]);
   const category = formatWord(match[2]);
   
-  // Convert string like "500 100 300" into an array and sum it up
   const amountString = match[3].trim();
   const amountArray = amountString.split(/\s+/).map(Number);
   const totalAmount = amountArray.reduce((sum, curr) => sum + curr, 0);
@@ -50,8 +75,8 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
   const validMembers = ["Aomy", "Mahin", "Piash", "Sayem", "Inan", "Pulok"];
   const validCategories = ["Bazar", "Electricity", "Gas", "Water", "Internet"];
 
-  if (!validMembers.includes(person)) return bot.sendMessage(chatId, `❌ Invalid person. Must be: ${validMembers.join(", ")}`);
-  if (!validCategories.includes(category)) return bot.sendMessage(chatId, `❌ Invalid category. Must be: ${validCategories.join(", ")}`);
+  if (!validMembers.includes(person)) return bot.sendMessage(chatId, `❌ Invalid person. Must be: \${validMembers.join(", ")}`);
+  if (!validCategories.includes(category)) return bot.sendMessage(chatId, `❌ Invalid category. Must be: \${validCategories.join(", ")}`);
   if (isNaN(totalAmount) || totalAmount <= 0) return bot.sendMessage(chatId, `❌ Invalid amounts provided.`);
 
   try {
@@ -62,7 +87,7 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
       createdAt: Date.now()
     });
     
-    const calculationNote = amountArray.length > 1 ? ` (${amountArray.join(" + ")} = ${totalAmount})` : ``;
+    const calculationNote = amountArray.length > 1 ? ` (amountArray.join(" + ") = {totalAmount})` : ``;
     bot.sendMessage(chatId, `✅ Added ${totalAmount} Tk${calculationNote} for ${person} in ${category}!`);
   } catch (error) {
     bot.sendMessage(chatId, `❌ Error saving to database: ${error.message}`);
@@ -101,8 +126,8 @@ const generateSummaryText = (title, expenses) => {
   return text;
 };
 
-// --- 4. CURRENT MONTH SUMMARY COMMAND ---
-bot.onText(/^summary$/i, async (msg) => {
+// --- 5. CURRENT MONTH SUMMARY COMMAND ---
+bot.onText(/^summary\$/i, async (msg) => {
   const chatId = msg.chat.id;
   try {
     const metaDoc = await db.collection("topkhana").doc("metadata").get();
@@ -118,8 +143,8 @@ bot.onText(/^summary$/i, async (msg) => {
   }
 });
 
-// --- 5. ARCHIVED MONTH SUMMARY COMMAND ---
-bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})$/i, async (msg, match) => {
+// --- 6. ARCHIVED MONTH SUMMARY COMMAND ---
+bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})\$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const searchTitle = `${formatWord(match[1])} ${match[2]}`;
   
@@ -135,4 +160,9 @@ bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})$/i, async (msg, match) => {
   }
 });
 
-console.log("Topkhana Telegram Bot initialized successfully!");
+// Global runtime error handler to prevent Render from crashing completely on minor network drops
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+console.log("Topkhana Telegram Bot system active!");
