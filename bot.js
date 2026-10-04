@@ -75,6 +75,7 @@ const generateSummaryText = (title, expenses, exclusions) => {
 
   let text = `📊 *${title} Summary*\n\n`;
   
+  // --- BAZAR BREAKDOWN ---
   text += `🛒 *Bazar Total: ${bazarTotal.toFixed(2)} Tk*\n`;
   text += `   _(Per person: ${bazarShare.toFixed(2)} Tk)_\n`;
   const bazarMap = {};
@@ -82,9 +83,17 @@ const generateSummaryText = (title, expenses, exclusions) => {
     bazarMap[e.person] = (bazarMap[e.person] || 0) + e.amount;
   });
   for (const [p, amt] of Object.entries(bazarMap)) {
-    text += `  • ${p}: spent ${amt.toFixed(2)} Tk\n`;
+    const owed = exclusions[p] ? 0 : bazarShare;
+    const net = amt - owed;
+    let statusText = "";
+    if (net < 0) statusText = `, owes: ${Math.abs(net).toFixed(2)} Tk`;
+    else if (net > 0) statusText = `, refund: ${net.toFixed(2)} Tk`;
+    else statusText = `, settled`;
+    
+    text += `  • ${p}: spent ${amt.toFixed(2)} Tk${statusText}\n`;
   }
 
+  // --- BILLS BREAKDOWN ---
   text += `\n💡 *Bills Total: ${billsTotal.toFixed(2)} Tk*\n`;
   text += `   _(Per person: ${billsShare.toFixed(2)} Tk)_\n`;
   const billsMap = {};
@@ -92,13 +101,20 @@ const generateSummaryText = (title, expenses, exclusions) => {
     billsMap[e.person] = (billsMap[e.person] || 0) + e.amount;
   });
   for (const [p, amt] of Object.entries(billsMap)) {
-    text += `  • ${p}: spent ${amt.toFixed(2)} Tk\n`;
+    const owed = billsShare;
+    const net = amt - owed;
+    let statusText = "";
+    if (net < 0) statusText = `, owes: ${Math.abs(net).toFixed(2)} Tk`;
+    else if (net > 0) statusText = `, refund: ${net.toFixed(2)} Tk`;
+    else statusText = `, settled`;
+    
+    text += `  • ${p}: spent ${amt.toFixed(2)} Tk${statusText}\n`;
   }
 
   text += `\n💰 *Grand Total: ${grandTotal.toFixed(2)} Tk*\n`;
   text += `━━━━━━━━━━━━━━━━━━━━\n\n`;
 
-  // Calculate Final Settlement
+  // --- FINAL SETTLEMENT ---
   text += `⚖️ *FINAL SETTLEMENT*\n\n`;
   members.forEach(m => {
     const paidBazar = bazarMap[m] || 0;
