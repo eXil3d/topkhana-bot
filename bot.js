@@ -1,90 +1,48 @@
-// --- 1. BULLETPROOF ES-MODULE & REQUIRE COMBINED HYBRID IMPORT ---
-let TelegramBot;
-try {
-  const botApi = require('node-telegram-bot-api');
-  
-  if (typeof botApi === 'function') {
-    TelegramBot = botApi;
-  } else if (botApi && typeof botApi.default === 'function') {
-    TelegramBot = botApi.default;
-  } else if (typeof botApi === 'object' && botApi !== null) {
-    // Deep inspect fallback keys if the module is strangely wrapped by bundlers
-    const keys = Object.keys(botApi);
-    const functionalKey = keys.find(k => typeof botApi[k] === 'function');
-    if (functionalKey) {
-      TelegramBot = botApi[functionalKey];
-    }
-  }
-} catch (e) {
-  console.error("⚠️ Failed to natively load node-telegram-bot-api wrapper. Attempting child process fix...");
-}
-
-// Hard fallback: If it's still missing, we dynamically fetch it
-if (!TelegramBot) {
-  try {
-    console.log("🔄 Package resolution issue detected. Enforcing dynamic execution fallback...");
-    TelegramBot = require('./node_modules/node-telegram-bot-api/src/telegram.js');
-  } catch (err) {
-    console.error("❌ CRITICAL: node-telegram-bot-api package structure could not be resolved.");
-    process.exit(1);
-  }
-}
-
+const botApi = require('node-telegram-bot-api');
 const admin = require('firebase-admin');
 const express = require('express');
 
-// --- 2. RENDER HEALTH CHECK SERVER ---
+// Safely extract the constructor (Bulletproof fallback)
+const TelegramBot = botApi.default || botApi;
+
+// --- 1. RENDER HEALTH CHECK SERVER ---
 const app = express();
-app.use(express.json());
-
 app.get('/', (req, res) => res.send('Topkhana Bot is running 24/7!'));
-
 const port = process.env.PORT || 3000;
-app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Web server listening on port \${port}`);
-});
+app.listen(port, () => console.log(`Web server listening on port ${port}`));
 
-// --- 3. INITIALIZE BOT & FIREBASE ---
+// --- 2. INITIALIZE BOT & FIREBASE ---
 const token = process.env.TELEGRAM_TOKEN;
 
+// Failsafe check for the token
 if (!token) {
   console.error("❌ CRITICAL ERROR: TELEGRAM_TOKEN environment variable is missing in Render!");
   process.exit(1);
 }
 
-// Initialize the bot safely
-let bot;
-try {
-  bot = new TelegramBot(token, { polling: true });
-  console.log("✅ TelegramBot constructor matched and initialized successfully!");
-} catch (error) {
-  console.error("❌ Failed to instantiate TelegramBot:", error.message);
-  process.exit(1);
-}
+// Initialize the bot
+const bot = new TelegramBot(token, { polling: true });
 
 // Initialize Firebase securely via Render Environment Variables
-try {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
-    })
-  });
-  console.log("✅ Firebase Admin initialized successfully!");
-} catch (error) {
-  console.error("❌ Firebase Initialization Error:", error.message);
-}
-
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
+  })
+});
 const db = admin.firestore();
+
 const formatWord = (str) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 
-// --- 4. ADD SPENDING COMMAND (Supports multiple amounts) ---
+// --- 3. ADD SPENDING COMMAND (Supports multiple amounts) ---
+// Listens for: "add aomy bazar 500 100 300"
 bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const person = formatWord(match[1]);
   const category = formatWord(match[2]);
   
+  // Convert string like "500 100 300" into an array and sum it up
   const amountString = match[3].trim();
   const amountArray = amountString.split(/\s+/).map(Number);
   const totalAmount = amountArray.reduce((sum, curr) => sum + curr, 0);
@@ -92,8 +50,8 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
   const validMembers = ["Aomy", "Mahin", "Piash", "Sayem", "Inan", "Pulok"];
   const validCategories = ["Bazar", "Electricity", "Gas", "Water", "Internet"];
 
-  if (!validMembers.includes(person)) return bot.sendMessage(chatId, `❌ Invalid person. Must be: \${validMembers.join(", ")}`);
-  if (!validCategories.includes(category)) return bot.sendMessage(chatId, `❌ Invalid category. Must be: \${validCategories.join(", ")}`);
+  if (!validMembers.includes(person)) return bot.sendMessage(chatId, `❌ Invalid person. Must be: ${validMembers.join(", ")}`);
+  if (!validCategories.includes(category)) return bot.sendMessage(chatId, `❌ Invalid category. Must be: ${validCategories.join(", ")}`);
   if (isNaN(totalAmount) || totalAmount <= 0) return bot.sendMessage(chatId, `❌ Invalid amounts provided.`);
 
   try {
@@ -104,7 +62,7 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
       createdAt: Date.now()
     });
     
-    const calculationNote = amountArray.length > 1 ? ` (amountArray.join(" + ") = {totalAmount})` : ``;
+    const calculationNote = amountArray.length > 1 ? ` (${amountArray.join(" + ")} = ${totalAmount})` : ``;
     bot.sendMessage(chatId, `✅ Added ${totalAmount} Tk${calculationNote} for ${person} in ${category}!`);
   } catch (error) {
     bot.sendMessage(chatId, `❌ Error saving to database: ${error.message}`);
@@ -143,8 +101,8 @@ const generateSummaryText = (title, expenses) => {
   return text;
 };
 
-// --- 5. CURRENT MONTH SUMMARY COMMAND ---
-bot.onText(/^summary\$/i, async (msg) => {
+// --- 4. CURRENT MONTH SUMMARY COMMAND ---
+bot.onText(/^summary$/i, async (msg) => {
   const chatId = msg.chat.id;
   try {
     const metaDoc = await db.collection("topkhana").doc("metadata").get();
@@ -160,8 +118,8 @@ bot.onText(/^summary\$/i, async (msg) => {
   }
 });
 
-// --- 6. ARCHIVED MONTH SUMMARY COMMAND ---
-bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})\$/i, async (msg, match) => {
+// --- 5. ARCHIVED MONTH SUMMARY COMMAND ---
+bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const searchTitle = `${formatWord(match[1])} ${match[2]}`;
   
@@ -177,8 +135,4 @@ bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})\$/i, async (msg, match) => {
   }
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-console.log("Topkhana Telegram Bot system active!");
+console.log("Topkhana Telegram Bot initialized successfully!");
