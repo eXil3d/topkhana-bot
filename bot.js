@@ -1,64 +1,36 @@
-// --- 1. BULLETPROOF ES-MODULE & REQUIRE COMBINED HYBRID IMPORT ---
-let TelegramBot;
-try {
-  const botApi = require('node-telegram-bot-api');
-  
-  if (typeof botApi === 'function') {
-    TelegramBot = botApi;
-  } else if (botApi && typeof botApi.default === 'function') {
-    TelegramBot = botApi.default;
-  } else if (typeof botApi === 'object' && botApi !== null) {
-    // Deep inspect fallback keys if the module is strangely wrapped by bundlers
-    const keys = Object.keys(botApi);
-    const functionalKey = keys.find(k => typeof botApi[k] === 'function');
-    if (functionalKey) {
-      TelegramBot = botApi[functionalKey];
-    }
-  }
-} catch (e) {
-  console.error("⚠️ Failed to natively load node-telegram-bot-api wrapper. Attempting child process fix...");
-}
-
-// Hard fallback: If it's still missing, we dynamically fetch it
-if (!TelegramBot) {
-  try {
-    console.log("🔄 Package resolution issue detected. Enforcing dynamic execution fallback...");
-    TelegramBot = require('./node_modules/node-telegram-bot-api/src/telegram.js');
-  } catch (err) {
-    console.error("❌ CRITICAL: node-telegram-bot-api package structure could not be resolved.");
-    process.exit(1);
-  }
-}
-
-const admin = require('firebase-admin');
+// --- 1. RESOLVE TELEGRAF CONSTRUCTOR ---
 const express = require('express');
+const admin = require('firebase-admin');
+let TelegrafModule;
 
-// --- 2. RENDER HEALTH CHECK SERVER ---
-const app = express();
-app.use(express.json());
-
-app.get('/', (req, res) => res.send('Topkhana Bot is running 24/7!'));
-
-const port = process.env.PORT || 3000;
-app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Web server listening on port \${port}`);
-});
-
-// --- 3. INITIALIZE BOT & FIREBASE ---
-const token = process.env.TELEGRAM_TOKEN;
-
-if (!token) {
-  console.error("❌ CRITICAL ERROR: TELEGRAM_TOKEN environment variable is missing in Render!");
+try {
+  TelegrafModule = require('telegraf');
+} catch (e) {
+  console.error("❌ CRITICAL: 'telegraf' module could not be required.");
   process.exit(1);
 }
 
-// Initialize the bot safely
+// Extract Telegraf class safely
+const Telegraf = TelegrafModule.Telegraf || TelegrafModule;
+if (!Telegraf) {
+  console.error("❌ CRITICAL: Could not find a valid Telegraf constructor.");
+  process.exit(1);
+}
+
+// --- 2. INITIALIZE BOT & FIREBASE ---
+const token = process.env.TELEGRAM_TOKEN;
+if (!token) {
+  console.error("❌ CRITICAL ERROR: TELEGRAM_TOKEN environment variable is missing!");
+  process.exit(1);
+}
+
+// Initialize Telegraf bot instance safely
 let bot;
 try {
-  bot = new TelegramBot(token, { polling: true });
-  console.log("✅ TelegramBot constructor matched and initialized successfully!");
+  bot = new Telegraf(token);
+  console.log("✅ Telegraf bot initialized successfully!");
 } catch (error) {
-  console.error("❌ Failed to instantiate TelegramBot:", error.message);
+  console.error("❌ Failed to instantiate Telegraf:", error.message);
   process.exit(1);
 }
 
@@ -79,9 +51,43 @@ try {
 const db = admin.firestore();
 const formatWord = (str) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 
+// --- 3. RENDER HEALTH CHECK & WEBHOOK SERVER ---
+const app = express();
+app.use(express.json());
+
+// Main Health Check
+app.get('/', (req, res) => res.send('Topkhana Bot is running 24/7!'));
+
+// Render requires binding to 0.0.0.0
+const port = process.env.PORT || 3000;
+app.listen(port, '0.0.0.0', async () => {
+  console.log(`🚀 Web server listening on port \${port}`);
+  
+  // Set up Telegraf handling for webhook requests or long polling safely
+  try {
+    if (process.env.RENDER_EXTERNAL_URL) {
+      const webhookUrl = `\({process.env.RENDER_EXTERNAL_URL}/bot\){token}`;
+      await bot.telegram.setWebhook(webhookUrl);
+      console.log(`📡 Webhook configured successfully to: \${webhookUrl}`);
+      
+      // Hook up the express router handling for Telegraf updates securely
+      app.use(bot.webhookCallback(`/bot\${token}`));
+    } else {
+      // Fallback to long polling if not running on Render environment variables
+      bot.launch();
+      console.log("🔄 Started bot using long polling mode.");
+    }
+  } catch (err) {
+    console.error("⚠️ Bot launch notification failed:", err.message);
+  }
+});
+
 // --- 4. ADD SPENDING COMMAND (Supports multiple amounts) ---
-bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match) => {
-  const chatId = msg.chat.id;
+// Telegraf uses hears() or raw text matching hooks instead of onText regex patterns
+bot.hears(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (ctx) => {
+  const chatId = ctx.chat.id;
+  const match = ctx.match;
+  
   const person = formatWord(match[1]);
   const category = formatWord(match[2]);
   
@@ -92,9 +98,9 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
   const validMembers = ["Aomy", "Mahin", "Piash", "Sayem", "Inan", "Pulok"];
   const validCategories = ["Bazar", "Electricity", "Gas", "Water", "Internet"];
 
-  if (!validMembers.includes(person)) return bot.sendMessage(chatId, `❌ Invalid person. Must be: \${validMembers.join(", ")}`);
-  if (!validCategories.includes(category)) return bot.sendMessage(chatId, `❌ Invalid category. Must be: \${validCategories.join(", ")}`);
-  if (isNaN(totalAmount) || totalAmount <= 0) return bot.sendMessage(chatId, `❌ Invalid amounts provided.`);
+  if (!validMembers.includes(person)) return ctx.reply(`❌ Invalid person. Must be: \${validMembers.join(", ")}`);
+  if (!validCategories.includes(category)) return ctx.reply(`❌ Invalid category. Must be: \${validCategories.join(", ")}`);
+  if (isNaN(totalAmount) || totalAmount <= 0) return ctx.reply(`❌ Invalid amounts provided.`);
 
   try {
     await db.collection("topkhana_expenses").add({
@@ -105,9 +111,9 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
     });
     
     const calculationNote = amountArray.length > 1 ? ` (amountArray.join(" + ") = {totalAmount})` : ``;
-    bot.sendMessage(chatId, `✅ Added ${totalAmount} Tk${calculationNote} for ${person} in ${category}!`);
+    ctx.reply(`✅ Added ${totalAmount} Tk${calculationNote} for ${person} in ${category}!`);
   } catch (error) {
-    bot.sendMessage(chatId, `❌ Error saving to database: ${error.message}`);
+    ctx.reply(`❌ Error saving to database: ${error.message}`);
   }
 });
 
@@ -144,39 +150,39 @@ const generateSummaryText = (title, expenses) => {
 };
 
 // --- 5. CURRENT MONTH SUMMARY COMMAND ---
-bot.onText(/^summary\$/i, async (msg) => {
-  const chatId = msg.chat.id;
+bot.hears(/^summary\$/i, async (ctx) => {
   try {
     const metaDoc = await db.collection("topkhana").doc("metadata").get();
     const currentMonthName = metaDoc.exists ? metaDoc.data().currentMonthName : "Current Month";
     
     const snapshot = await db.collection("topkhana_expenses").get();
-    if (snapshot.empty) return bot.sendMessage(chatId, `No expenses recorded for ${currentMonthName} yet.`);
+    if (snapshot.empty) return ctx.reply(`No expenses recorded for ${currentMonthName} yet.`);
     
     const expenses = snapshot.docs.map(doc => doc.data());
-    bot.sendMessage(chatId, generateSummaryText(currentMonthName, expenses), { parse_mode: 'Markdown' });
+    ctx.replyWithMarkdown(generateSummaryText(currentMonthName, expenses));
   } catch (error) {
-    bot.sendMessage(chatId, `❌ Error fetching summary: ${error.message}`);
+    ctx.reply(`❌ Error fetching summary: ${error.message}`);
   }
 });
 
 // --- 6. ARCHIVED MONTH SUMMARY COMMAND ---
-bot.onText(/^summary\s+([a-zA-Z]+)\s+(\d{4})\$/i, async (msg, match) => {
-  const chatId = msg.chat.id;
+bot.hears(/^summary\s+([a-zA-Z]+)\s+(\d{4})\$/i, async (ctx) => {
+  const match = ctx.match;
   const searchTitle = `${formatWord(match[1])} ${match[2]}`;
   
   try {
     const snapshot = await db.collection("topkhana_history").get();
     const targetMonth = snapshot.docs.map(d => d.data()).find(h => h.title === searchTitle);
     
-    if (!targetMonth) return bot.sendMessage(chatId, `❌ Could not find an archive for "${searchTitle}".`);
+    if (!targetMonth) return ctx.reply(`❌ Could not find an archive for "${searchTitle}".`);
 
-    bot.sendMessage(chatId, generateSummaryText(targetMonth.title, targetMonth.expenses), { parse_mode: 'Markdown' });
+    ctx.replyWithMarkdown(generateSummaryText(targetMonth.title, targetMonth.expenses));
   } catch (error) {
-    bot.sendMessage(chatId, `❌ Error fetching history: ${error.message}`);
+    ctx.reply(`❌ Error fetching history: ${error.message}`);
   }
 });
 
+// Prevent Render instances from hard crashing during transient network connection drops
 process.on('unhandledRejection', (reason, promise) => {
   console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
 });
