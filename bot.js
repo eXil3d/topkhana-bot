@@ -255,13 +255,14 @@ bot.onText(/^add\s+([a-zA-Z]+)\s+([a-zA-Z]+)\s+([\d\.\s]+)$/i, async (msg, match
   if (totalAmount <= 0) return bot.sendMessage(chatId, `❌ Invalid amount.`);
 
   try {
-    await db.collection("topkhana_expenses").add({
-      person,
-      category,
-      amount: totalAmount,
-      createdAt: Date.now()
+    const batch = db.batch();
+    nums.forEach((num, index) => {
+      const ref = db.collection("topkhana_expenses").doc();
+      batch.set(ref, { person, category, amount: num, createdAt: Date.now() + index });
     });
-    const note = nums.length > 1 ? ` (${nums.join(" + ")} = ${totalAmount})` : ``;
+    await batch.commit();
+
+    const note = nums.length > 1 ? ` (Saved as ${nums.length} separate entries)` : ``;
     bot.sendMessage(chatId, `✅ <b>Expense Saved!</b>\nAdded <b>${totalAmount} Tk</b>${note} for <b>${person}</b> in <b>${category}</b>.`, {
       parse_mode: 'HTML',
       reply_markup: getMainMenuKeyboard()
@@ -623,14 +624,14 @@ bot.on('message', async (msg) => {
     delete sessions[chatId];
 
     try {
-      await db.collection("topkhana_expenses").add({
-        person,
-        category,
-        amount: totalAmount,
-        createdAt: Date.now()
+      const batch = db.batch();
+      nums.forEach((num, index) => {
+        const ref = db.collection("topkhana_expenses").doc();
+        batch.set(ref, { person, category, amount: num, createdAt: Date.now() + index });
       });
+      await batch.commit();
 
-      const calcNote = nums.length > 1 ? ` (${nums.join(" + ")} = ${totalAmount})` : ``;
+      const calcNote = nums.length > 1 ? ` (Saved as ${nums.length} separate entries)` : ``;
       await bot.sendMessage(
         chatId,
         `✅ <b>Expense Saved!</b>\nAdded <b>${totalAmount} Tk</b>${calcNote} for <b>${person}</b> in <b>${category}</b>.`,
